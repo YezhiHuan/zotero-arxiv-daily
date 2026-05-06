@@ -134,7 +134,7 @@ class ArxivRetriever(BaseRetriever):
         # 使用 arxiv API 搜索
         search = arxiv.Search(
             query=full_query,
-            max_results=100,
+            max_results=50,
             sort_by=arxiv.SortCriterion.SubmittedDate,
             sort_order=arxiv.SortOrder.Descending
         )
