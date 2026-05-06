@@ -12,6 +12,7 @@ from queue import Empty
 from typing import Any, Callable, TypeVar
 from loguru import logger
 import requests
+from datetime import datetime, timedelta
 
 T = TypeVar("T")
 
@@ -113,42 +114,35 @@ class ArxivRetriever(BaseRetriever):
             raise ValueError("category must be specified for arxiv.")
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
+        """使用 arxiv API 获取昨天一天的论文"""
         client = arxiv.Client(num_retries=10, delay_seconds=10)
-        query = '+'.join(self.config.source.arxiv.category)
-        include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
-        # Get the latest paper from arxiv rss feed
-        feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
-        if 'Feed error for query' in feed.feed.title:
-            raise Exception(f"Invalid ARXIV_QUERY: {query}.")
         
-        # DEBUG: 打印 RSS feed 返回的详细信息
-        logger.info(f"DEBUG: RSS feed total entries: {len(feed.entries)}")
-        for idx, entry in enumerate(feed.entries[:20]):  # 只打印前20条
-            announce_type = entry.get("arxiv_announce_type", "new")
-            paper_id = entry.id.removeprefix("oai:arXiv.org:")
-            logger.info(f"DEBUG: entry[{idx}] id={paper_id}, announce_type={announce_type}")
+        # 计算昨天的日期范围
+        today = datetime.now()
+        yesterday = today - timedelta(days=1)
+        yesterday_str = yesterday.strftime("%Y%m%d")
+        today_str = today.strftime("%Y%m%d")
         
-        raw_papers = []
-        allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
-        all_paper_ids = [
-            i.id.removeprefix("oai:arXiv.org:")
-            for i in feed.entries
-            if i.get("arxiv_announce_type", "new") in allowed_announce_types
-        ]
-        logger.info(f"DEBUG: allowed_announce_types={allowed_announce_types}, filtered count={len(all_paper_ids)}")
+        # 构建查询: 按 category 过滤 + 按日期范围过滤
+        categories = self.config.source.arxiv.category
+        cat_query = "+OR+".join([f"cat:{c}" for c in categories])
+        date_query = f"submittedDate:[{yesterday_str}0000+TO+{yesterday_str}2359]"
+        full_query = f"({cat_query})+AND+{date_query}"
         
-        if self.config.executor.debug:
-            all_paper_ids = all_paper_ids[:10]
-
-        # Get full information of each paper from arxiv api
-        bar = tqdm(total=len(all_paper_ids))
-        for i in range(0, len(all_paper_ids), 20):
-            search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
-            batch = list(client.results(search))
-            bar.update(len(batch))
-            raw_papers.extend(batch)
-        bar.close()
-
+        logger.info(f"arXiv API query: {full_query}")
+        
+        # 使用 arxiv API 搜索
+        search = arxiv.Search(
+            query=full_query,
+            max_results=100,
+            sort_by=arxiv.SortCriterion.SubmittedDate,
+            sort_order=arxiv.SortOrder.Descending
+        )
+        
+        # 获取所有结果
+        raw_papers = list(client.results(search))
+        logger.info(f"Retrieved {len(raw_papers)} papers from arxiv API for {yesterday_str}")
+        
         return raw_papers
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
