@@ -120,6 +120,14 @@ class ArxivRetriever(BaseRetriever):
         feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
         if 'Feed error for query' in feed.feed.title:
             raise Exception(f"Invalid ARXIV_QUERY: {query}.")
+        
+        # DEBUG: 打印 RSS feed 返回的详细信息
+        logger.info(f"DEBUG: RSS feed total entries: {len(feed.entries)}")
+        for idx, entry in enumerate(feed.entries[:20]):  # 只打印前20条
+            announce_type = entry.get("arxiv_announce_type", "new")
+            paper_id = entry.id.removeprefix("oai:arXiv.org:")
+            logger.info(f"DEBUG: entry[{idx}] id={paper_id}, announce_type={announce_type}")
+        
         raw_papers = []
         allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
         all_paper_ids = [
@@ -127,6 +135,8 @@ class ArxivRetriever(BaseRetriever):
             for i in feed.entries
             if i.get("arxiv_announce_type", "new") in allowed_announce_types
         ]
+        logger.info(f"DEBUG: allowed_announce_types={allowed_announce_types}, filtered count={len(all_paper_ids)}")
+        
         if self.config.executor.debug:
             all_paper_ids = all_paper_ids[:10]
 
