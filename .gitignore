@@ -16,4 +16,5 @@ logs
 models
 test-compose.yml
 outputs
+cache
 config/private.yaml

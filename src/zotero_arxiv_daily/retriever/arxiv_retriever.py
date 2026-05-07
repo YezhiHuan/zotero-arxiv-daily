@@ -13,12 +13,16 @@ from typing import Any, Callable, TypeVar
 from loguru import logger
 import requests
 from datetime import datetime, timedelta
+import pickle
+import hashlib
+from pathlib import Path
 
 T = TypeVar("T")
 
 DOWNLOAD_TIMEOUT = (10, 60)
 PDF_EXTRACT_TIMEOUT = 180
 TAR_EXTRACT_TIMEOUT = 180
+CACHE_DIR = Path("cache/arxiv")
 
 
 def _download_file(url: str, path: str) -> None:
@@ -113,36 +117,68 @@ class ArxivRetriever(BaseRetriever):
         if self.config.source.arxiv.category is None:
             raise ValueError("category must be specified for arxiv.")
 
+    def _cache_key(self, date_str: str) -> str:
+        """生成缓存键: 日期 + 分类的 hash"""
+        categories = tuple(sorted(self.config.source.arxiv.category))
+        cat_hash = hashlib.md5("+".join(categories).encode()).hexdigest()[:8]
+        return f"{date_str}_{cat_hash}"
+
+    def _load_cache(self, cache_path: Path) -> list[ArxivResult] | None:
+        if not cache_path.exists():
+            return None
+        try:
+            with open(cache_path, "rb") as f:
+                data = pickle.load(f)
+            logger.info(f"Loaded {len(data)} cached arXiv results from {cache_path}")
+            return data
+        except Exception as exc:
+            logger.warning(f"Failed to load cache {cache_path}: {exc}")
+            return None
+
+    def _save_cache(self, cache_path: Path, papers: list[ArxivResult]) -> None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                pickle.dump(papers, f)
+            logger.info(f"Cached {len(papers)} arXiv results to {cache_path}")
+        except Exception as exc:
+            logger.warning(f"Failed to save cache {cache_path}: {exc}")
+
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        """使用 arxiv API 获取昨天一天的论文"""
-        client = arxiv.Client(num_retries=10, delay_seconds=10)
-        
-        # 计算昨天的日期范围
-        today = datetime.now()
-        yesterday = today - timedelta(days=1)
+        """使用 arxiv API 获取昨天一天的论文（带缓存）"""
+        yesterday = datetime.now() - timedelta(days=1)
         yesterday_str = yesterday.strftime("%Y%m%d")
-        today_str = today.strftime("%Y%m%d")
-        
+
+        # 检查缓存
+        cache_path = CACHE_DIR / f"{self._cache_key(yesterday_str)}.pkl"
+        cached = self._load_cache(cache_path)
+        if cached is not None:
+            return cached
+
+        # 缓存未命中，请求 API（减少重试次数，避免 429 限流风暴）
+        client = arxiv.Client(num_retries=3, delay_seconds=10)
+
         # 构建查询: 按 category 过滤 + 按日期范围过滤
         categories = self.config.source.arxiv.category
         cat_query = "+OR+".join([f"cat:{c}" for c in categories])
         date_query = f"submittedDate:[{yesterday_str}0000+TO+{yesterday_str}2359]"
         full_query = f"({cat_query})+AND+{date_query}"
-        
+
         logger.info(f"arXiv API query: {full_query}")
-        
-        # 使用 arxiv API 搜索
+
         search = arxiv.Search(
             query=full_query,
             max_results=50,
             sort_by=arxiv.SortCriterion.SubmittedDate,
             sort_order=arxiv.SortOrder.Descending
         )
-        
-        # 获取所有结果
+
         raw_papers = list(client.results(search))
         logger.info(f"Retrieved {len(raw_papers)} papers from arxiv API for {yesterday_str}")
-        
+
+        # 写入缓存
+        self._save_cache(cache_path, raw_papers)
+
         return raw_papers
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
