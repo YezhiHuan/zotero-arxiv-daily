@@ -1,6 +1,7 @@
 """Tests for ArxivRetriever."""
 
 import time
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import feedparser
@@ -32,6 +33,8 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
 
     # Build fake ArxivResult-like objects matching each RSS entry
     fake_results = []
+    yesterday = datetime.now() - timedelta(days=1)
+    yesterday_date = yesterday.date()  # Extract date once
     for entry in new_entries:
         pid = entry.id.removeprefix("oai:arXiv.org:")
         fake_results.append(SimpleNamespace(
@@ -41,6 +44,7 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
             pdf_url=f"https://arxiv.org/pdf/{pid}",
             entry_id=f"https://arxiv.org/abs/{pid}",
             source_url=lambda pid=pid: f"https://arxiv.org/e-print/{pid}",
+            published=SimpleNamespace(date=lambda d=yesterday_date: d),
         ))
 
     class FakeClient:

@@ -130,6 +130,9 @@ class ArxivRetriever(BaseRetriever):
         try:
             with open(cache_path, "rb") as f:
                 data = pickle.load(f)
+            if not data:  # 空列表也视为缓存未命中
+                logger.info(f"Cache is empty at {cache_path}, refetching")
+                return None
             logger.info(f"Loaded {len(data)} cached arXiv results from {cache_path}")
             return data
         except Exception as exc:
@@ -167,9 +170,10 @@ class ArxivRetriever(BaseRetriever):
         raw_papers = self._fetch_with_backoff(full_query)
 
         # 过滤出昨天的论文（防止时区边界问题）
+        # 使用 getattr 安全获取 published 属性，避免测试中的 mock 对象没有该属性
         raw_papers = [
             p for p in raw_papers
-            if p.published.date() == yesterday.date()
+            if getattr(getattr(p, 'published', None), 'date', lambda: None)() == yesterday.date()
         ]
 
         logger.info(f"Retrieved {len(raw_papers)} papers from arxiv API for {yesterday_str}")
