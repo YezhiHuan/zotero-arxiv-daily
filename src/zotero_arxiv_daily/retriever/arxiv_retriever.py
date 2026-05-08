@@ -183,10 +183,10 @@ class ArxivRetriever(BaseRetriever):
 
         return raw_papers
 
-    def _fetch_with_backoff(self, query: str, max_retries: int = 5) -> list[ArxivResult]:
+    def _fetch_with_backoff(self, query: str, max_retries: int = 10) -> list[ArxivResult]:
         """使用指数退避获取论文，避免 429 限流"""
-        base_delay = 10  # 初始延迟 10 秒
-        max_delay = 300  # 最大延迟 5 分钟
+        base_delay = 30  # 初始延迟 30 秒
+        max_delay = 600  # 最大延迟 10 分钟
 
         for attempt in range(max_retries):
             try:
