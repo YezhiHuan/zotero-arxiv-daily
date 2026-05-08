@@ -198,6 +198,11 @@ class ArxivRetriever(BaseRetriever):
         include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
         allowed_types = {"new", "cross"} if include_cross_list else {"new"}
 
+        # 获取今天和昨天的日期（RSS feed 可能只包含今天的论文）
+        today_date = datetime.now().date()
+        yesterday_date = yesterday.date()
+        valid_dates = {today_date, yesterday_date}
+
         raw_papers = []
         for cat in categories:
             feed_url = f"https://rss.arxiv.org/atom/{cat}"
@@ -213,7 +218,7 @@ class ArxivRetriever(BaseRetriever):
             for e in feed.entries[:10]:
                 dates_in_feed.append(e.get("published", ""))
             logger.info(f"RSS feed entry dates (first 10): {dates_in_feed}")
-            logger.info(f"Looking for papers from {yesterday.date()}")
+            logger.info(f"Looking for papers from {valid_dates}")
 
             for entry in feed.entries:
                 # 检查是否是目标类型
@@ -221,7 +226,7 @@ class ArxivRetriever(BaseRetriever):
                 if announce_type not in allowed_types:
                     continue
 
-                # 解析发布日期，过滤昨天的论文
+                # 解析发布日期，过滤昨天和今天的论文
                 try:
                     published_str = entry.get("published", "")
                     published = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
@@ -230,14 +235,14 @@ class ArxivRetriever(BaseRetriever):
                     logger.warning(f"Could not parse published date: {published_str}")
                     continue
 
-                if published_date != yesterday.date():
+                if published_date not in valid_dates:
                     continue
 
                 # 构造 ArxivResult 兼容对象
                 paper_id = entry.get("id", "").removeprefix("oai:arXiv.org:")
                 raw_papers.append(RSSEntryResult(entry, paper_id))
 
-        logger.info(f"Retrieved {len(raw_papers)} papers from RSS feed for {yesterday_str}")
+        logger.info(f"Retrieved {len(raw_papers)} papers from RSS feed")
 
         # 写入缓存
         self._save_cache(cache_path, raw_papers)
