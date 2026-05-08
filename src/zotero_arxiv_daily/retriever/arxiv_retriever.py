@@ -208,8 +208,8 @@ class ArxivRetriever(BaseRetriever):
                 return list(client.results(search))
 
             except arxiv.HTTPError as e:
-                if e.status_code == 429 or e.status_code == 503:
-                    logger.warning(f"arXiv API returned {e.status_code}, retrying...")
+                if e.status == 429 or e.status == 503:
+                    logger.warning(f"arXiv API returned {e.status}, retrying...")
                     continue
                 raise
         raise RuntimeError(f"Failed to fetch from arXiv after {max_retries} retries")

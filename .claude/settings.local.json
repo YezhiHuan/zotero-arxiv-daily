@@ -4,7 +4,9 @@
       "Bash(uv run *)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(python3 -c \"import arxiv; help\\(arxiv.HTTPError\\)\")",
+      "Bash(git commit *)"
     ]
   }
 }
