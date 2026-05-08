@@ -21,6 +21,40 @@ from pathlib import Path
 T = TypeVar("T")
 
 DOWNLOAD_TIMEOUT = (10, 60)
+
+
+class RSSEntryResult:
+    """包装 RSS 条目，提供 ArxivResult 兼容接口"""
+
+    def __init__(self, entry, paper_id: str):
+        self.entry = entry
+        self.paper_id = paper_id
+        self.title = entry.get("title", "")
+        self.summary = entry.get("summary", "")
+        self.entry_id = entry.get("id", "")
+        # 从 entry.id 构造 PDF URL: oai:arXiv.org:2501.00001v1 -> https://arxiv.org/pdf/2501.00001.pdf
+        self.pdf_url = f"https://arxiv.org/pdf/{paper_id}.pdf"
+
+    @property
+    def authors(self):
+        """返回 Author 对象列表（每个有 .name 属性）"""
+        class Author:
+            def __init__(self, name):
+                self.name = name
+        return [Author(a.get("name", "")) for a in self.entry.get("authors", [])]
+
+    def source_url(self):
+        """返回 LaTeX 源码 URL"""
+        return f"https://arxiv.org/e-print/{self.paper_id}"
+
+    @property
+    def published(self):
+        """返回 datetime 对象"""
+        published_str = self.entry.get("published", "")
+        return datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+
+
+DOWNLOAD_TIMEOUT = (10, 60)
 PDF_EXTRACT_TIMEOUT = 180
 TAR_EXTRACT_TIMEOUT = 180
 CACHE_DIR = Path("cache/arxiv")
@@ -149,7 +183,7 @@ class ArxivRetriever(BaseRetriever):
             logger.warning(f"Failed to save cache {cache_path}: {exc}")
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        """使用 arxiv API 获取昨天一天的论文（带缓存）"""
+        """使用 arxiv RSS feed 获取昨天一天的论文（无 API 限流问题）"""
         yesterday = datetime.now() - timedelta(days=1)
         yesterday_str = yesterday.strftime("%Y%m%d")
 
@@ -159,24 +193,44 @@ class ArxivRetriever(BaseRetriever):
         if cached is not None:
             return cached
 
-        # 缓存未命中，请求 API（使用指数退避避免 429 限流）
+        # RSS feed 不受 API 限流限制，直接获取
         categories = self.config.source.arxiv.category
-        cat_query = "+OR+".join([f"cat:{c}" for c in categories])
-        date_query = f"submittedDate:[{yesterday_str}0000+TO+{yesterday_str}2359]"
-        full_query = f"({cat_query})+AND+{date_query}"
+        include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
+        allowed_types = {"new", "cross"} if include_cross_list else {"new"}
 
-        logger.info(f"arXiv API query: {full_query}")
+        raw_papers = []
+        for cat in categories:
+            feed_url = f"https://rss.arxiv.org/atom/{cat}"
+            logger.info(f"Fetching RSS feed: {feed_url}")
+            feed = feedparser.parse(feed_url)
 
-        raw_papers = self._fetch_with_backoff(full_query)
+            if hasattr(feed.feed, 'title') and 'error' in feed.feed.title.lower():
+                logger.warning(f"RSS feed error for category {cat}: {feed.feed.title}")
+                continue
 
-        # 过滤出昨天的论文（防止时区边界问题）
-        # 使用 getattr 安全获取 published 属性，避免测试中的 mock 对象没有该属性
-        raw_papers = [
-            p for p in raw_papers
-            if getattr(getattr(p, 'published', None), 'date', lambda: None)() == yesterday.date()
-        ]
+            for entry in feed.entries:
+                # 检查是否是目标类型
+                announce_type = entry.get("arxiv_announce_type", "new")
+                if announce_type not in allowed_types:
+                    continue
 
-        logger.info(f"Retrieved {len(raw_papers)} papers from arxiv API for {yesterday_str}")
+                # 解析发布日期，过滤昨天的论文
+                try:
+                    published_str = entry.get("published", "")
+                    published = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+                    published_date = published.date()
+                except (ValueError, AttributeError):
+                    logger.warning(f"Could not parse published date: {published_str}")
+                    continue
+
+                if published_date != yesterday.date():
+                    continue
+
+                # 构造 ArxivResult 兼容对象
+                paper_id = entry.get("id", "").removeprefix("oai:arXiv.org:")
+                raw_papers.append(RSSEntryResult(entry, paper_id))
+
+        logger.info(f"Retrieved {len(raw_papers)} papers from RSS feed for {yesterday_str}")
 
         # 写入缓存
         self._save_cache(cache_path, raw_papers)

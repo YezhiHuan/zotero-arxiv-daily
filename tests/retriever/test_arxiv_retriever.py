@@ -22,38 +22,36 @@ def _raise_runtime_error() -> None:
 def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
     monkeypatch.setattr("zotero_arxiv_daily.retriever.base.sleep", lambda _: None)
 
-    # The RSS fixture gives us paper IDs.  After feedparser, the code calls
-    # arxiv.Client().results(search) which makes real HTTP requests.  We mock
-    # the arxiv Client so the test stays offline.
+    # Build fake entries with yesterday's date for each category
+    yesterday = datetime.now() - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%Y-%m-%d")
+
     new_entries = [
         e for e in mock_feedparser.entries
         if e.get("arxiv_announce_type", "new") == "new"
     ]
-    paper_ids = [e.id.removeprefix("oai:arXiv.org:") for e in new_entries]
 
-    # Build fake ArxivResult-like objects matching each RSS entry
-    fake_results = []
-    yesterday = datetime.now() - timedelta(days=1)
-    yesterday_date = yesterday.date()  # Extract date once
+    # Build fake RSS feed entries with yesterday's date
+    fake_entries = []
     for entry in new_entries:
         pid = entry.id.removeprefix("oai:arXiv.org:")
-        fake_results.append(SimpleNamespace(
-            title=entry.title,
-            authors=[SimpleNamespace(name="Test Author")],
-            summary="Test abstract",
-            pdf_url=f"https://arxiv.org/pdf/{pid}",
-            entry_id=f"https://arxiv.org/abs/{pid}",
-            source_url=lambda pid=pid: f"https://arxiv.org/e-print/{pid}",
-            published=SimpleNamespace(date=lambda d=yesterday_date: d),
-        ))
+        # Use dict to mimic feedparser entry (which has .get() method)
+        fake_entry = {
+            "id": f"oai:arXiv.org:{pid}v1",
+            "title": entry.title,
+            "summary": entry.summary,
+            "published": f"{yesterday_str}T00:00:00-04:00",
+            "arxiv_announce_type": "new",
+            "authors": [{"name": "Test Author"}],
+        }
+        fake_entries.append(fake_entry)
 
-    class FakeClient:
-        def __init__(self, **kw):
-            pass
-        def results(self, search):
-            return iter(fake_results)
-
-    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FakeClient)
+    # Mock feedparser.parse to return our fake feed
+    class FakeFeed:
+        def __init__(self, entries):
+            self.entries = entries
+            self.feed = SimpleNamespace(title="Test Feed")
+    monkeypatch.setattr(feedparser, "parse", lambda url: FakeFeed(fake_entries))
 
     # Skip file downloads in convert_to_paper
     monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", lambda paper: None)
@@ -63,7 +61,8 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
     retriever = ArxivRetriever(config)
     papers = retriever.retrieve_papers()
 
-    assert len(papers) == len(new_entries)
+    # With 2 categories (cs.AI, cs.CV) and 2 entries each, we get 4 papers
+    assert len(papers) == len(new_entries) * len(config["source"]["arxiv"]["category"])
     assert set(p.title for p in papers) == set(e.title for e in new_entries)
 
 
