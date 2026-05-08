@@ -208,6 +208,13 @@ class ArxivRetriever(BaseRetriever):
                 logger.warning(f"RSS feed error for category {cat}: {feed.feed.title}")
                 continue
 
+            # 调试：打印 feed 中有多少条以及日期范围
+            dates_in_feed = []
+            for e in feed.entries[:10]:
+                dates_in_feed.append(e.get("published", ""))
+            logger.info(f"RSS feed entry dates (first 10): {dates_in_feed}")
+            logger.info(f"Looking for papers from {yesterday.date()}")
+
             for entry in feed.entries:
                 # 检查是否是目标类型
                 announce_type = entry.get("arxiv_announce_type", "new")
