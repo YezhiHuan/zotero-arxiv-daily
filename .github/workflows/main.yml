@@ -17,6 +17,14 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Cache arxiv results
+        uses: actions/cache@v4
+        with:
+          path: cache/arxiv
+          key: arxiv-cache-${{ runner.os }}-${{ hashFiles('config/custom.yaml') }}
+          restore-keys: |
+            arxiv-cache-${{ runner.os }}-
+
       - name: Run script
         env:
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}

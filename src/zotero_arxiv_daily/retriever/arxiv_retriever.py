@@ -13,6 +13,7 @@ from typing import Any, Callable, TypeVar
 from loguru import logger
 import requests
 from datetime import datetime, timedelta
+import time
 import pickle
 import hashlib
 from pathlib import Path
@@ -155,7 +156,9 @@ class ArxivRetriever(BaseRetriever):
         if cached is not None:
             return cached
 
-        # 缓存未命中，请求 API（减少重试次数，避免 429 限流风暴）
+        # 缓存未命中，请求 API（遵守 arXiv 速率限制: 1请求/3秒）
+        # 添加延迟避免 429
+        time.sleep(3)
         client = arxiv.Client(num_retries=3, delay_seconds=10)
 
         # 构建查询: 按 category 过滤 + 按日期范围过滤
