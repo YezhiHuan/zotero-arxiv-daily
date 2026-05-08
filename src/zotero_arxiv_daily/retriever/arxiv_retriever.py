@@ -156,12 +156,7 @@ class ArxivRetriever(BaseRetriever):
         if cached is not None:
             return cached
 
-        # 缓存未命中，请求 API（遵守 arXiv 速率限制: 1请求/3秒）
-        # 添加延迟避免 429
-        time.sleep(3)
-        client = arxiv.Client(num_retries=3, delay_seconds=10)
-
-        # 构建查询: 按 category 过滤 + 按日期范围过滤
+        # 缓存未命中，请求 API（使用指数退避避免 429 限流）
         categories = self.config.source.arxiv.category
         cat_query = "+OR+".join([f"cat:{c}" for c in categories])
         date_query = f"submittedDate:[{yesterday_str}0000+TO+{yesterday_str}2359]"
@@ -169,20 +164,51 @@ class ArxivRetriever(BaseRetriever):
 
         logger.info(f"arXiv API query: {full_query}")
 
-        search = arxiv.Search(
-            query=full_query,
-            max_results=50,
-            sort_by=arxiv.SortCriterion.SubmittedDate,
-            sort_order=arxiv.SortOrder.Descending
-        )
+        raw_papers = self._fetch_with_backoff(full_query)
 
-        raw_papers = list(client.results(search))
+        # 过滤出昨天的论文（防止时区边界问题）
+        raw_papers = [
+            p for p in raw_papers
+            if p.published.date() == yesterday.date()
+        ]
+
         logger.info(f"Retrieved {len(raw_papers)} papers from arxiv API for {yesterday_str}")
 
         # 写入缓存
         self._save_cache(cache_path, raw_papers)
 
         return raw_papers
+
+    def _fetch_with_backoff(self, query: str, max_retries: int = 5) -> list[ArxivResult]:
+        """使用指数退避获取论文，避免 429 限流"""
+        base_delay = 10  # 初始延迟 10 秒
+        max_delay = 300  # 最大延迟 5 分钟
+
+        for attempt in range(max_retries):
+            try:
+                # 遵守 arXiv 速率限制: 1请求/3秒
+                if attempt > 0:
+                    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                    logger.info(f"Retry {attempt}, waiting {delay}s before request...")
+                    time.sleep(delay)
+                else:
+                    time.sleep(3)  # 第一次请求前也等 3 秒
+
+                client = arxiv.Client(num_retries=0)  # 我们自己处理重试
+                search = arxiv.Search(
+                    query=query,
+                    max_results=100,  # 增加到 100
+                    sort_by=arxiv.SortCriterion.SubmittedDate,
+                    sort_order=arxiv.SortOrder.Descending
+                )
+                return list(client.results(search))
+
+            except arxiv.HTTPError as e:
+                if e.status_code == 429 or e.status_code == 503:
+                    logger.warning(f"arXiv API returned {e.status_code}, retrying...")
+                    continue
+                raise
+        raise RuntimeError(f"Failed to fetch from arXiv after {max_retries} retries")
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
         title = raw_paper.title
