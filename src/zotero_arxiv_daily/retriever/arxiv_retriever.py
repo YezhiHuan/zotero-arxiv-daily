@@ -183,71 +183,142 @@ class ArxivRetriever(BaseRetriever):
             logger.warning(f"Failed to save cache {cache_path}: {exc}")
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        """使用 arxiv RSS feed 获取昨天一天的论文（无 API 限流问题）"""
+        """获取最近几天的论文。
+
+        策略：优先用 arXiv API，结果不足时（API 返回的日期比网站显示的旧）
+        补充抓取 HTML 列表页。
+        """
+        import arxiv
+
         yesterday = datetime.now() - timedelta(days=1)
         yesterday_str = yesterday.strftime("%Y%m%d")
-
-        # 检查缓存
         cache_path = CACHE_DIR / f"{self._cache_key(yesterday_str)}.pkl"
         cached = self._load_cache(cache_path)
         if cached is not None:
             return cached
 
-        # RSS feed 不受 API 限流限制，直接获取
-        categories = self.config.source.arxiv.category
-        include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
-        allowed_types = {"new", "cross"} if include_cross_list else {"new"}
-
-        # 获取今天和昨天的日期（RSS feed 可能只包含今天的论文）
         today_date = datetime.now().date()
         yesterday_date = yesterday.date()
         valid_dates = {today_date, yesterday_date}
 
+        categories = self.config.source.arxiv.category
+        include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
+
         raw_papers = []
         for cat in categories:
-            feed_url = f"https://rss.arxiv.org/atom/{cat}"
-            logger.info(f"Fetching RSS feed: {feed_url}")
-            feed = feedparser.parse(feed_url)
+            logger.info(f"Fetching via arXiv API: cat:{cat}")
+            query = f"cat:{cat}"
+            if not include_cross_list:
+                query += " ANDNOT cross_list:yes"
 
-            if hasattr(feed.feed, 'title') and 'error' in feed.feed.title.lower():
-                logger.warning(f"RSS feed error for category {cat}: {feed.feed.title}")
-                continue
+            client = arxiv.Client(num_retries=3)
+            search = arxiv.Search(
+                query=query,
+                max_results=200,
+                sort_by=arxiv.SortCriterion.SubmittedDate,
+                sort_order=arxiv.SortOrder.Descending,
+            )
+            results = list(client.results(search))
+            logger.info(f"arXiv API returned {len(results)} papers for {cat}")
 
-            # 调试：打印 feed 中有多少条以及日期范围
-            dates_in_feed = []
-            for e in feed.entries[:10]:
-                dates_in_feed.append(e.get("published", ""))
-            logger.info(f"RSS feed entry dates (first 10): {dates_in_feed}")
-            logger.info(f"Looking for papers from {valid_dates}")
-
-            for entry in feed.entries:
-                # 检查是否是目标类型
-                announce_type = entry.get("arxiv_announce_type", "new")
-                if announce_type not in allowed_types:
-                    continue
-
-                # 解析发布日期，过滤昨天和今天的论文
+            # 客户端过滤：只保留昨天和今天的论文
+            api_papers = []
+            for r in results:
                 try:
-                    published_str = entry.get("published", "")
-                    published = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
-                    published_date = published.date()
-                except (ValueError, AttributeError):
-                    logger.warning(f"Could not parse published date: {published_str}")
+                    published_date = r.published.date()
+                except AttributeError:
                     continue
+                if published_date in valid_dates:
+                    api_papers.append(r)
 
-                if published_date not in valid_dates:
-                    continue
+            logger.info(f"After date filter: {len(api_papers)} papers for {cat}")
 
-                # 构造 ArxivResult 兼容对象
-                paper_id = entry.get("id", "").removeprefix("oai:arXiv.org:")
-                raw_papers.append(RSSEntryResult(entry, paper_id))
+            # API 结果很少时（网站显示了较新的论文但 API 还没同步），抓 HTML 补充
+            if len(api_papers) < 5:
+                logger.info(f"API returned few results, scraping HTML for {cat}")
+                html_papers = self._fetch_from_html(cat, valid_dates)
+                logger.info(f"HTML scrape got {len(html_papers)} papers for {cat}")
+                if html_papers:
+                    raw_papers.extend(html_papers)
+                    continue  # 已用 HTML 结果，不需要合并
 
-        logger.info(f"Retrieved {len(raw_papers)} papers from RSS feed")
+            raw_papers.extend(api_papers)
 
-        # 写入缓存
         self._save_cache(cache_path, raw_papers)
-
         return raw_papers
+
+    def _fetch_from_html(self, category: str, valid_dates: set) -> list:
+        """从 arXiv HTML 列表页抓取指定分类的论文，按日期过滤。"""
+        import requests
+        import re
+
+        url = f"https://arxiv.org/list/{category}/recent"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+        except Exception as exc:
+            logger.warning(f"HTML fetch failed for {category}: {exc}")
+            return []
+
+        if resp.status_code != 200:
+            return []
+
+        content = resp.text
+        # 解析日期区块：每个区块以 "Day, DD Mon YYYY" 开头，后跟该日期的论文
+        date_pattern = re.compile(r"([A-Z][a-z]{2}, \d+ [A-Z][a-z]{2} \d{4})")
+        # 论文 ID 在 /abs/xxxx.xxxxx 中
+        paper_pattern = re.compile(r"/abs/(\d{4}\.\d{5})")
+
+        # 收集所有日期分界点及其位置
+        date_matches = [(m.group(1), m.start()) for m in date_pattern.finditer(content)]
+
+        papers_by_date = {}
+        for i, (date_str, start_pos) in enumerate(date_matches):
+            # 解析 "Fri, 8 May 2026" -> date
+            try:
+                parsed = datetime.strptime(date_str, "%a, %d %b %Y").date()
+            except ValueError:
+                continue
+            papers_by_date[parsed] = []
+
+            # 该日期区块的结束位置是下一个日期区块的开始位置
+            end_pos = date_matches[i + 1][1] if i + 1 < len(date_matches) else len(content)
+            # 在这个区间内找所有论文 ID
+            for m in paper_pattern.finditer(content, start_pos, end_pos):
+                papers_by_date[parsed].append(m.group(1))
+
+        # 过滤：只保留 valid_dates 中的论文
+        selected_ids = set()
+        for d, ids in papers_by_date.items():
+            if d in valid_dates:
+                for pid in ids:
+                    selected_ids.add(pid)
+
+        logger.info(f"HTML papers by date: {dict(papers_by_date)}")
+        logger.info(f"Selected IDs: {selected_ids}")
+
+        if not selected_ids:
+            return []
+
+        # 用 arXiv API 获取这些 paper ID 的详情（复用客户端逻辑）
+        return self._fetch_papers_by_ids(selected_ids)
+
+    def _fetch_papers_by_ids(self, paper_ids: set) -> list:
+        """根据 paper ID 列表批量获取论文详情。"""
+        import arxiv
+
+        client = arxiv.Client(num_retries=3)
+        results = []
+        for pid in paper_ids:
+            query = f"id:{pid}"
+            search = arxiv.Search(query=query, max_results=1)
+            try:
+                res = list(client.results(search))
+                if res:
+                    results.append(res[0])
+            except Exception as exc:
+                logger.warning(f"Failed to fetch paper {pid}: {exc}")
+        return results
 
     def _fetch_with_backoff(self, query: str, max_retries: int = 10) -> list[ArxivResult]:
         """使用指数退避获取论文，避免 429 限流"""
